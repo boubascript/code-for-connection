@@ -6,63 +6,6 @@ export const twimlRouter = Router();
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-/** Base URL for Twilio to fetch name-audio (must be public). Uses PUBLIC_URL. */
-function getPublicBaseUrl(): string | null {
-  const base = process.env.PUBLIC_URL;
-  if (!base) return null;
-  return base.replace(/\/$/, '');
-}
-
-/**
- * GET /twiml/name-audio/:callId — Stream the incarcerated person's recorded name audio.
- * Called by Twilio when executing <Play> in the greeting. No auth — validated by callId.
- */
-twimlRouter.get('/name-audio/:callId', async (req: Request, res: Response) => {
-  const { callId } = req.params;
-  console.log(`[twiml] === NAME-AUDIO REQUEST === callId=${callId}`);
-  try {
-    const call = await prisma.voiceCall.findUnique({
-      where: { id: callId },
-      select: {
-        incarceratedPerson: {
-          select: {
-            nameAudioBytes: true,
-            nameAudioContentType: true,
-            nameAudioApproved: true,
-          },
-        },
-      },
-    });
-
-    const person = call?.incarceratedPerson as
-      | { nameAudioBytes?: Buffer | null; nameAudioContentType?: string | null; nameAudioApproved?: boolean }
-      | undefined;
-
-    console.log(`[twiml] name-audio lookup: callId=${callId} callFound=${!!call} approved=${person?.nameAudioApproved ?? 'N/A'} contentType=${person?.nameAudioContentType ?? 'N/A'} audioSize=${person?.nameAudioBytes?.length ?? 0} bytes`);
-
-    if (
-      !person?.nameAudioApproved ||
-      person.nameAudioBytes == null ||
-      person.nameAudioBytes.length === 0
-    ) {
-      console.warn(`[twiml] name-audio NOT AVAILABLE for callId=${callId}: approved=${person?.nameAudioApproved} hasBytes=${person?.nameAudioBytes != null} byteLen=${person?.nameAudioBytes?.length ?? 0}`);
-      res.status(404).send('Name audio not available');
-      return;
-    }
-
-    const contentType = person.nameAudioContentType || 'audio/webm';
-    const buffer = Buffer.isBuffer(person.nameAudioBytes)
-      ? person.nameAudioBytes
-      : Buffer.from(person.nameAudioBytes as ArrayBuffer);
-    console.log(`[twiml] name-audio SENDING: callId=${callId} contentType=${contentType} bufferSize=${buffer.length} bytes`);
-    res.set('Cache-Control', 'no-store');
-    res.type(contentType).send(buffer);
-  } catch (error) {
-    console.error(`[twiml] Error serving name-audio for call ${callId}:`, error);
-    res.status(500).send('Error');
-  }
-});
-
 /**
  * POST /twiml/greeting/:callId — Initial IVR greeting.
  *
@@ -96,11 +39,7 @@ twimlRouter.post('/greeting/:callId', async (req: Request, res: Response) => {
     }
 
     const facilityName = call.incarceratedPerson.facility.name;
-    const person = call.incarceratedPerson as typeof call.incarceratedPerson & {
-      nameAudioBytes?: Buffer | null;
-      nameAudioContentType?: string | null;
-      nameAudioApproved?: boolean;
-    };
+    const person = call.incarceratedPerson;
 
     // Check if the announcement should include the person's name
     const nameSetting = await prisma.systemConfiguration.findUnique({
@@ -108,14 +47,11 @@ twimlRouter.post('/greeting/:callId', async (req: Request, res: Response) => {
     });
     const includeName = nameSetting?.value === 'YES';
 
-    const hasApprovedNameAudio =
-      includeName &&
-      person.nameAudioApproved &&
-      person.nameAudioBytes != null &&
-      person.nameAudioBytes.length > 0;
-    const publicBase = getPublicBaseUrl();
+    const greeting = includeName
+      ? `You are receiving a call from ${person.firstName} ${person.lastName} at ${facilityName}.`
+      : `You are receiving a call from someone who is incarcerated at ${facilityName}.`;
 
-    console.log(`[twiml] greeting decision: callId=${callId} includeName=${includeName} (setting=${nameSetting?.value ?? 'NOT SET'}) nameAudioApproved=${person.nameAudioApproved} audioSize=${person.nameAudioBytes?.length ?? 0} hasApprovedNameAudio=${hasApprovedNameAudio} publicBase=${publicBase ?? 'NULL'}`);
+    console.log(`[twiml] greeting: callId=${callId} includeName=${includeName}`);
 
     const twiml = new VoiceResponse();
     const gather = twiml.gather({
@@ -123,27 +59,10 @@ twimlRouter.post('/greeting/:callId', async (req: Request, res: Response) => {
       action: `/api/voice/twiml/handle-key/${callId}`,
       method: 'POST',
     });
-
-    if (hasApprovedNameAudio && publicBase) {
-      // Play recorded name audio, then TTS for facility and instructions
-      const audioUrl = `${publicBase}/api/voice/twiml/name-audio/${callId}`;
-      console.log(`[twiml] greeting: PLAYING recorded name audio from ${audioUrl}`);
-      gather.play({}, audioUrl);
-      gather.say(
-        { voice: 'Polly.Joanna' },
-        ` at ${facilityName}. Press 1 to accept this call. Press 2 to decline. Press 3 to block future calls from this person.`,
-      );
-    } else {
-      // Fallback: full greeting via text-to-speech
-      const greeting = includeName
-        ? `You are receiving a call from ${person.firstName} ${person.lastName} at ${facilityName}.`
-        : `You are receiving a call from someone who is incarcerated at ${facilityName}.`;
-      console.log(`[twiml] greeting: USING TTS fallback (includeName=${includeName}, hasApprovedNameAudio=${hasApprovedNameAudio}, publicBase=${publicBase ?? 'NULL'})`);
-      gather.say(
-        { voice: 'Polly.Joanna' },
-        `${greeting} Press 1 to accept this call. Press 2 to decline. Press 3 to block future calls from this person.`,
-      );
-    }
+    gather.say(
+      { voice: 'Polly.Joanna' },
+      `${greeting} Press 1 to accept this call. Press 2 to decline. Press 3 to block future calls from this person.`,
+    );
 
     // If no input, replay the greeting
     twiml.redirect(`/api/voice/twiml/greeting/${callId}`);
