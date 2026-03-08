@@ -38,7 +38,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (data.success) setUser(data.data);
           else localStorage.removeItem('token');
         })
-        .catch(() => localStorage.removeItem('token'))
+        .catch((err) => { console.error('[AuthContext] Failed to fetch /auth/me:', err); localStorage.removeItem('token'); })
         .finally(() => setLoading(false));
     } else {
       setLoading(false);
